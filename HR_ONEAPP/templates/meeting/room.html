@@ -1,0 +1,334 @@
+{% extends "base.html" %}
+{% block title %}{{ meeting.title }} — Meeting Room{% endblock %}
+{% block page_title %}{{ meeting.title }}{% endblock %}
+{% block breadcrumb %}<p class="crumb">Meetings › Room</p>{% endblock %}
+
+{% block content %}
+<div class="room-shell fade-in">
+
+  <div class="room-topbar">
+    <div style="display:flex;align-items:center;gap:.75rem;">
+      <span class="live-dot"></span>
+      <div>
+        <strong style="color:#fff;">{{ meeting.title }}</strong>
+        <p style="font-size:.75rem;color:rgba(255,255,255,.55);">Started by {{ meeting.starter.name }}</p>
+      </div>
+    </div>
+    <div id="room-timer" style="font-size:1rem;font-weight:700;color:#a5b4fc;font-variant-numeric:tabular-nums;">00:00:00</div>
+    <div style="display:flex;gap:.5rem;">
+      {% if session.user_role == 'admin' %}
+      <a href="{{ url_for('meeting.manage', meeting_id=meeting.id) }}" class="btn btn-ghost btn-sm" style="color:rgba(255,255,255,.7);border-color:rgba(255,255,255,.2);">📋 Manage</a>
+      <form method="POST" action="{{ url_for('meeting.end_meeting', meeting_id=meeting.id) }}" style="display:inline" onsubmit="return confirm('End for everyone?')">
+        <button class="btn btn-danger btn-sm">⏹ End</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Exactly ONE self-tile element exists in the DOM. It is never re-created. -->
+  <div class="video-grid" id="video-grid">
+    <div class="video-tile self-tile" id="self-tile">
+      <video id="self-video" autoplay muted playsinline style="display:none;width:100%;height:100%;object-fit:cover;"></video>
+      <div class="tile-avatar" id="self-ph">
+        <div class="big-avatar-circle">{{ session.user_name[0]|upper }}</div>
+      </div>
+      <div class="tile-label">
+        <span>{{ session.user_name }} (You)</span>
+        <span style="display:flex;gap:.3rem;">
+          <span id="self-mic-i">🔇</span>
+          <span id="self-cam-i">📵</span>
+        </span>
+      </div>
+    </div>
+    <!-- Remote tiles + the single screen-share tile are inserted/removed here by JS, each keyed by a unique id so they can never duplicate. -->
+  </div>
+
+  <div class="side-panel" id="side-panel" style="display:none;">
+    <div class="panel-hdr">
+      <span style="font-weight:700;font-size:.9rem;">Participants ({{ participants|length }})</span>
+      <button onclick="closePanel()" style="background:none;border:none;cursor:pointer;color:rgba(255,255,255,.6);font-size:1.1rem;">✕</button>
+    </div>
+    <ul style="list-style:none;overflow-y:auto;flex:1;">
+      {% for p in participants %}
+      <li id="p-{{ p.user_id }}" style="display:flex;align-items:center;gap:.65rem;padding:.65rem 1rem;border-bottom:1px solid rgba(255,255,255,.06);">
+        <div class="p-av">{{ p.user.name[0]|upper }}</div>
+        <div style="flex:1;">
+          <p style="font-size:.85rem;color:#e2e8f0;font-weight:500;">
+            {{ p.user.name }}{% if p.user_id==session.user_id %} <em style="opacity:.5;">(You)</em>{% endif %}
+          </p>
+          <p style="font-size:.72rem;color:rgba(255,255,255,.4);">{{ p.user.role|capitalize }}</p>
+        </div>
+        <span id="pm-{{ p.user_id }}" style="opacity:.4;font-size:.9rem;">🔇</span>
+        <span id="pc-{{ p.user_id }}" style="opacity:.4;font-size:.9rem;">📵</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+
+  <div class="controls-bar">
+    <button class="ctrl off" id="btn-mic" onclick="toggleMic()">
+      <span id="mic-icon">🎤</span><span class="clbl" id="lbl-mic">Unmute</span>
+    </button>
+    <button class="ctrl off" id="btn-cam" onclick="toggleCam()">
+      <span id="cam-icon">📷</span><span class="clbl" id="lbl-cam">Camera</span>
+    </button>
+    <button class="ctrl" id="btn-audio" onclick="toggleAudio()">
+      <span id="audio-icon">🔊</span><span class="clbl" id="lbl-audio">Speaker</span>
+    </button>
+    <button class="ctrl" id="btn-screen" onclick="toggleScreen()">
+      <span id="screen-icon">🖥️</span><span class="clbl" id="lbl-screen">Share</span>
+    </button>
+    <button class="ctrl" onclick="togglePanel()">
+      👥<span class="clbl">People ({{ participants|length }})</span>
+    </button>
+    <form method="POST" action="{{ url_for('meeting.leave_room', meeting_id=meeting.id) }}" style="display:inline;" onsubmit="cleanup()">
+      <button type="submit" class="ctrl leave">📞<span class="clbl">Leave</span></button>
+    </form>
+  </div>
+
+</div>
+
+<style>
+.room-shell{display:flex;flex-direction:column;height:calc(100vh - 140px);background:#0c0f1a;border-radius:var(--radius-lg);overflow:hidden;position:relative;}
+.room-topbar{background:#111827;padding:.75rem 1.5rem;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.06);flex-wrap:wrap;gap:.5rem;}
+.live-dot{width:10px;height:10px;background:#ef4444;border-radius:50%;flex-shrink:0;animation:lpulse 1.5s infinite;}
+@keyframes lpulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.5;transform:scale(1.4);}}
+
+.video-grid{flex:1;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:6px;padding:8px;overflow-y:auto;background:#0c0f1a;align-content:start;}
+.video-tile{position:relative;background:#1a1f2e;border-radius:10px;overflow:hidden;aspect-ratio:16/9;border:2px solid transparent;transition:.2s;}
+.video-tile.speaking{border-color:#4f46e5;}
+.tile-avatar{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;}
+.big-avatar-circle{width:64px;height:64px;border-radius:50%;background:#4f46e5;display:flex;align-items:center;justify-content:center;font-size:1.6rem;font-weight:700;color:#fff;}
+.tile-label{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,.75));color:#fff;padding:.45rem .65rem;font-size:.78rem;display:flex;justify-content:space-between;align-items:center;}
+.screen-full{grid-column:1/-1;aspect-ratio:16/9;}
+
+.side-panel{position:absolute;right:8px;top:60px;width:250px;bottom:78px;background:#111827;border:1px solid rgba(255,255,255,.08);border-radius:12px;z-index:50;display:flex;flex-direction:column;box-shadow:0 12px 30px rgba(0,0,0,.5);}
+.panel-hdr{padding:.7rem 1rem;border-bottom:1px solid rgba(255,255,255,.08);display:flex;justify-content:space-between;align-items:center;}
+.p-av{width:30px;height:30px;border-radius:50%;background:#4f46e5;display:flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:700;color:#fff;flex-shrink:0;}
+
+.controls-bar{display:flex;align-items:center;justify-content:center;gap:8px;padding:.9rem;background:#111827;border-top:1px solid rgba(255,255,255,.06);flex-wrap:wrap;}
+.ctrl{display:flex;flex-direction:column;align-items:center;gap:3px;background:#1f2937;border:none;border-radius:10px;cursor:pointer;padding:.55rem .85rem;min-width:74px;color:#e5e7eb;transition:.15s;}
+.ctrl:hover{background:#2d3748;transform:translateY(-1px);}
+.ctrl.active{background:#4f46e5;color:#fff;}
+.ctrl.off{background:#3a1a1a;color:#fca5a5;}
+.ctrl.off:hover{background:#4a2020;}
+.ctrl.leave{background:#dc2626;color:#fff;}
+.ctrl.leave:hover{background:#b91c1c;}
+.clbl{font-size:.68rem;font-weight:600;white-space:nowrap;}
+</style>
+
+<script>
+const MID   = {{ meeting.id }};
+const UID   = {{ session.user_id }};
+const UNAME = "{{ session.user_name }}";
+
+/* All mutable media state lives in ONE object so there's exactly one source of truth
+   per tab — this is what prevents duplicate streams/tiles. */
+const state = {
+  stream: null,        // single local camera/mic MediaStream
+  screenStream: null,  // single screen-share MediaStream
+  micOn: false,
+  camOn: false,
+  audioOn: true,
+  screenOn: false,
+  vadCtx: null,
+  vadLoop: null,
+  pollTimer: null
+};
+
+function tick(){
+  const s = Math.floor((Date.now() - START) / 1000);
+  document.getElementById('room-timer').textContent =
+    [Math.floor(s/3600), Math.floor((s%3600)/60), s%60].map(v => String(v).padStart(2,'0')).join(':');
+}
+const START = new Date("{{ meeting.started_at.isoformat() }}Z");
+setInterval(tick, 1000); tick();
+
+/* ── ONE camera/mic stream, requested once and reused ──
+   Guard: if state.stream already exists, return it immediately instead of
+   calling getUserMedia again. This is the single fix that prevents the
+   "two camera feeds" bug — getUserMedia was previously called on every
+   toggle, creating a new stream and a second <video> source each time. */
+async function getStream(){
+  if (state.stream) return state.stream;
+  try {
+    state.stream = await navigator.mediaDevices.getUserMedia({audio:true, video:true});
+    state.stream.getAudioTracks().forEach(t => t.enabled = false);
+    state.stream.getVideoTracks().forEach(t => t.enabled = false);
+    const v = document.getElementById('self-video');
+    v.srcObject = state.stream;   // attached exactly once
+  } catch(e) {
+    console.warn('Media unavailable:', e);
+    state.stream = null;
+  }
+  return state.stream;
+}
+
+async function toggleMic(){
+  await getStream();
+  state.micOn = !state.micOn;
+  if (state.stream) state.stream.getAudioTracks().forEach(t => t.enabled = state.micOn);
+  document.getElementById('mic-icon').textContent  = state.micOn ? '🎤' : '🔇';
+  document.getElementById('lbl-mic').textContent   = state.micOn ? 'Mute' : 'Unmute';
+  document.getElementById('self-mic-i').textContent= state.micOn ? '🎤' : '🔇';
+  document.getElementById('btn-mic').className = 'ctrl ' + (state.micOn ? 'active' : 'off');
+  if (state.micOn) startVAD(); else stopVAD();
+  broadcast();
+}
+
+/* Camera toggle reuses the same stream's video track — it never requests
+   a new stream, so there is only ever one <video> element showing your feed. */
+async function toggleCam(){
+  await getStream();
+  state.camOn = !state.camOn;
+  if (state.stream) state.stream.getVideoTracks().forEach(t => t.enabled = state.camOn);
+  const vid = document.getElementById('self-video');
+  const ph  = document.getElementById('self-ph');
+  vid.style.display = state.camOn ? 'block' : 'none';
+  ph.style.display  = state.camOn ? 'none'  : 'flex';
+  document.getElementById('cam-icon').textContent  = state.camOn ? '📷' : '📵';
+  document.getElementById('lbl-cam').textContent   = state.camOn ? 'Stop Cam' : 'Camera';
+  document.getElementById('self-cam-i').textContent= state.camOn ? '📷' : '📵';
+  document.getElementById('btn-cam').className = 'ctrl ' + (state.camOn ? 'active' : 'off');
+  broadcast();
+}
+
+function toggleAudio(){
+  state.audioOn = !state.audioOn;
+  document.querySelectorAll('.remote-vid').forEach(v => v.muted = !state.audioOn);
+  document.getElementById('audio-icon').textContent = state.audioOn ? '🔊' : '🔇';
+  document.getElementById('lbl-audio').textContent  = state.audioOn ? 'Speaker' : 'Muted';
+  document.getElementById('btn-audio').className    = 'ctrl ' + (state.audioOn ? 'active' : 'off');
+}
+
+/* Screen share: exactly one #screen-tile element. We look it up by id before
+   creating one — if it already exists (e.g. a stray click), we reuse it
+   instead of inserting a second tile. Switching camera <-> screen share is
+   independent since they're separate MediaStreams; turning one on/off never
+   touches the other's tracks. */
+async function toggleScreen(){
+  if (state.screenOn) { stopScreen(); return; }
+  try {
+    state.screenStream = await navigator.mediaDevices.getDisplayMedia({video:true, audio:false});
+    state.screenOn = true;
+    document.getElementById('screen-icon').textContent = '🖥️';
+    document.getElementById('lbl-screen').textContent  = 'Stop Share';
+    document.getElementById('btn-screen').classList.add('active');
+
+    let tile = document.getElementById('screen-tile');
+    if (!tile) {
+      tile = document.createElement('div');
+      tile.id = 'screen-tile';
+      tile.className = 'video-tile screen-full';
+      const vid = document.createElement('video');
+      vid.autoplay = true; vid.muted = true; vid.playsInline = true;
+      vid.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#000;';
+      const lbl = document.createElement('div');
+      lbl.className = 'tile-label';
+      lbl.textContent = UNAME + ' — Screen';
+      tile.append(vid, lbl);
+      document.getElementById('video-grid').prepend(tile);
+    }
+    tile.querySelector('video').srcObject = state.screenStream;
+    state.screenStream.getVideoTracks()[0].onended = stopScreen;   // clean stop via browser's native "Stop sharing" button too
+  } catch(e) { console.warn('Screen share cancelled'); }
+}
+
+function stopScreen(){
+  state.screenOn = false;
+  if (state.screenStream) { state.screenStream.getTracks().forEach(t => t.stop()); state.screenStream = null; }
+  document.getElementById('screen-tile')?.remove();   // removes the one tile cleanly, nothing left behind
+  document.getElementById('screen-icon').textContent = '🖥️';
+  document.getElementById('lbl-screen').textContent  = 'Share';
+  document.getElementById('btn-screen').classList.remove('active');
+}
+
+let panelOpen = false;
+function togglePanel(){ panelOpen = !panelOpen; document.getElementById('side-panel').style.display = panelOpen ? 'flex' : 'none'; }
+function closePanel(){ panelOpen = false; document.getElementById('side-panel').style.display = 'none'; }
+
+function startVAD(){
+  if (!state.stream || state.vadCtx) return;
+  try {
+    state.vadCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const an = state.vadCtx.createAnalyser();
+    state.vadCtx.createMediaStreamSource(state.stream).connect(an);
+    an.fftSize = 256;
+    const d = new Uint8Array(an.frequencyBinCount);
+    const tile = document.getElementById('self-tile');
+    function loop(){
+      an.getByteFrequencyData(d);
+      tile.classList.toggle('speaking', d.reduce((a,b)=>a+b)/d.length > 15);
+      if (state.micOn) state.vadLoop = requestAnimationFrame(loop);
+      else tile.classList.remove('speaking');
+    }
+    state.vadLoop = requestAnimationFrame(loop);
+  } catch(e) {}
+}
+function stopVAD(){
+  if (state.vadLoop) cancelAnimationFrame(state.vadLoop);
+  if (state.vadCtx) { state.vadCtx.close(); state.vadCtx = null; }
+  document.getElementById('self-tile')?.classList.remove('speaking');
+}
+
+async function broadcast(){
+  try {
+    await fetch(`/meeting/state/${MID}`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({mic: state.micOn, cam: state.camOn})
+    });
+  } catch(e) {}
+}
+
+/* Remote presence tiles: one tile per peer, looked up by id before creating.
+   Because we always check getElementById first, polling every 3s can never
+   produce a second tile for the same person. */
+async function poll(){
+  try {
+    const res = await fetch(`/meeting/state/${MID}`);
+    const peers = await res.json();
+    peers.forEach(p => {
+      if (p.user_id === UID) return;   // never render a remote tile for yourself
+      const mi = document.getElementById(`pm-${p.user_id}`);
+      const ci = document.getElementById(`pc-${p.user_id}`);
+      if (mi) { mi.textContent = p.mic ? '🎤' : '🔇'; mi.style.opacity = p.mic ? '1' : '.4'; }
+      if (ci) { ci.textContent = p.cam ? '📷' : '📵'; ci.style.opacity = p.cam ? '1' : '.4'; }
+      ensureRemoteTile(p);
+    });
+  } catch(e) {}
+}
+
+function ensureRemoteTile(p){
+  let tile = document.getElementById(`rt-${p.user_id}`);
+  if (!tile) {
+    tile = document.createElement('div');
+    tile.className = 'video-tile';
+    tile.id = `rt-${p.user_id}`;
+    const ph = document.createElement('div'); ph.className = 'tile-avatar';
+    const av = document.createElement('div'); av.className = 'big-avatar-circle';
+    av.textContent = (p.name || '?')[0].toUpperCase();
+    ph.appendChild(av);
+    const lbl = document.createElement('div'); lbl.className = 'tile-label';
+    lbl.innerHTML = `<span>${p.name || 'Participant'}</span><span style="display:flex;gap:.3rem;"><span id="rtm-${p.user_id}">🔇</span><span id="rtc-${p.user_id}">📵</span></span>`;
+    tile.append(ph, lbl);
+    document.getElementById('video-grid').appendChild(tile);
+  }
+  const rtm = document.getElementById(`rtm-${p.user_id}`);
+  const rtc = document.getElementById(`rtc-${p.user_id}`);
+  if (rtm) rtm.textContent = p.mic ? '🎤' : '🔇';
+  if (rtc) rtc.textContent = p.cam ? '📷' : '📵';
+}
+
+function cleanup(){
+  clearInterval(state.pollTimer);
+  stopVAD();
+  if (state.stream)       state.stream.getTracks().forEach(t => t.stop());
+  if (state.screenStream) state.screenStream.getTracks().forEach(t => t.stop());
+}
+
+broadcast();
+state.pollTimer = setInterval(poll, 3000);
+poll();
+window.addEventListener('beforeunload', cleanup);
+</script>
+{% endblock %}
